@@ -1,0 +1,102 @@
+# Jonathan: bathroom-before-bed reminder
+#
+# Between 7pm and 11pm, when the FP2 bed zone sees Jonathan get into bed and his
+# toilet has not been flushed in the last 5 minutes, his HomePods tell him to go
+# to the bathroom. The reminder repeats every 90 seconds until the toilet
+# vibration sensor fires. At most 2 reminders are started per night.
+#
+# This is a single automation with no helpers. To install by hand: Settings ->
+# Automations -> Create automation -> Edit in YAML, and paste this file.
+
+id: jonathan_bedtime_bathroom_reminder
+alias: "Jonathan: bathroom before bed reminder"
+description: >-
+  Reminds Jonathan on his HomePods to use the bathroom when he gets into bed
+  without having flushed in the last 5 minutes. Repeats every 90 seconds until
+  he flushes. Limited to 2 reminders per night, 7pm-11pm.
+mode: single
+max_exceeded: silent
+
+triggers:
+  # FP2 bed zone in Jonathan's room.
+  - trigger: state
+    entity_id: binary_sensor.jonathan_presence_sensor_bed
+    from: "off"
+    to: "on"
+
+conditions:
+  - condition: time
+    after: "19:00:00"
+    before: "23:00:00"
+  # No flush detected in the last 5 minutes.
+  - condition: state
+    entity_id: binary_sensor.kids_room_toilet_vibraion_sensor_vibration
+    state: "off"
+    for: "00:05:00"
+
+actions:
+  - variables:
+      alert_started: "{{ now().timestamp() }}"
+      # True when this automation already ran once since 7pm tonight, which
+      # makes this run the second (and last) reminder of the night.
+      second_tonight: >-
+        {% set last = this.attributes.get('last_triggered') %}
+        {{ last is not none and (last | as_datetime) >= today_at('19:00') }}
+      previous_volume: "{{ state_attr('media_player.jonathan_s_room', 'volume_level') }}"
+
+  - repeat:
+      sequence:
+        - action: media_player.turn_on
+          continue_on_error: true
+          target:
+            entity_id: media_player.jonathan_s_room
+        - delay: "00:00:02"
+        - action: media_player.volume_set
+          continue_on_error: true
+          target:
+            entity_id: media_player.jonathan_s_room
+          data:
+            volume_level: 0.5
+        - action: tts.speak
+          continue_on_error: true
+          target:
+            entity_id: tts.openai_tts_gpt_4o_mini_tts
+          data:
+            media_player_entity_id: media_player.jonathan_s_room
+            cache: true
+            message: >-
+              Jonathan, please go to the bathroom before you go to bed.
+        # Wait up to 90 seconds for a flush. Checking last_changed also catches
+        # a flush that happened while the HomePods were still speaking.
+        - wait_template: >-
+            {{ is_state('binary_sensor.kids_room_toilet_vibraion_sensor_vibration', 'on')
+               or as_timestamp(states.binary_sensor.kids_room_toilet_vibraion_sensor_vibration.last_changed)
+                  > alert_started }}
+          timeout: "00:01:30"
+      until:
+        # Stop once he flushes. As a safety net (dead sensor battery, nobody
+        # home) give up after 30 minutes.
+        - condition: template
+          value_template: >-
+            {{ wait.completed or now().timestamp() - alert_started > 1800 }}
+
+  # Put the speakers back to the volume they were at.
+  - if:
+      - condition: template
+        value_template: "{{ previous_volume is number }}"
+    then:
+      - action: media_player.volume_set
+        continue_on_error: true
+        target:
+          entity_id: media_player.jonathan_s_room
+        data:
+          volume_level: "{{ previous_volume }}"
+
+  # After the second reminder of the night, stay busy until 11pm. Because the
+  # mode is "single", any further bed detections tonight are ignored.
+  - if:
+      - condition: template
+        value_template: "{{ second_tonight }}"
+    then:
+      - delay:
+          seconds: "{{ [(today_at('23:00') - now()).total_seconds() | int, 0] | max }}"
