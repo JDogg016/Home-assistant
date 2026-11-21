@@ -1,9 +1,13 @@
 # Jonathan: bathroom-before-bed reminder
 #
-# Between 7pm and 11pm, when the FP2 bed zone sees Jonathan get into bed and his
-# toilet has not been flushed in the last 5 minutes, his HomePods tell him to go
-# to the bathroom. The reminder repeats every 90 seconds until the toilet
-# vibration sensor fires. At most 2 reminders are started per night.
+# Between 7pm and 11pm, when the FP2 bed zone sees Jonathan get into bed and he
+# has not flushed in the last 5 minutes, his HomePods tell him to go to the
+# bathroom. The reminder repeats every 90 seconds until he flushes. At most 2
+# reminders are started per night.
+#
+# The bathroom is shared with Olivia, so a flush is only credited to Jonathan if
+# it does not look like hers: after a flush, whichever room picks up new motion
+# first within 3 minutes tells us who it was.
 #
 # This is a single automation with no helpers. To install by hand: Settings ->
 # Automations -> Create automation -> Edit in YAML, and paste this file.
@@ -13,7 +17,8 @@ alias: "Jonathan: bathroom before bed reminder"
 description: >-
   Reminds Jonathan on his HomePods to use the bathroom when he gets into bed
   without having flushed in the last 5 minutes. Repeats every 90 seconds until
-  he flushes. Limited to 2 reminders per night, 7pm-11pm.
+  he flushes. A flush followed by new motion in Olivia's room is treated as
+  hers and does not count. Limited to 2 reminders per night, 7pm-11pm.
 mode: single
 max_exceeded: silent
 
@@ -28,11 +33,21 @@ conditions:
   - condition: time
     after: "19:00:00"
     before: "23:00:00"
-  # No flush detected in the last 5 minutes.
-  - condition: state
-    entity_id: binary_sensor.kids_room_toilet_vibraion_sensor_vibration
-    state: "off"
-    for: "00:05:00"
+  - condition: or
+    conditions:
+      # Nobody has flushed in the last 5 minutes...
+      - condition: state
+        entity_id: binary_sensor.kids_room_toilet_vibraion_sensor_vibration
+        state: "off"
+        for: "00:05:00"
+      # ...or the recent flush was Olivia's: her room became occupied after it.
+      - condition: template
+        value_template: >-
+          {% set toilet = states.binary_sensor.kids_room_toilet_vibraion_sensor_vibration %}
+          {% set olivia = states.binary_sensor.olivia_s_room_olivias_room_presence_sensor_occupancy %}
+          {{ toilet is not none and olivia is not none
+             and toilet.state == 'off' and olivia.state == 'on'
+             and olivia.last_changed > toilet.last_changed }}
 
 actions:
   - variables:
@@ -44,41 +59,79 @@ actions:
         {{ last is not none and (last | as_datetime) >= today_at('19:00') }}
       previous_volume: "{{ state_attr('media_player.jonathan_s_room', 'volume_level') }}"
 
+  # One pass per flush: remind until the toilet flushes, then work out whose
+  # flush it was. If it was Olivia's, go round again.
   - repeat:
       sequence:
-        - action: media_player.turn_on
-          continue_on_error: true
-          target:
-            entity_id: media_player.jonathan_s_room
-        - delay: "00:00:02"
-        - action: media_player.volume_set
-          continue_on_error: true
-          target:
-            entity_id: media_player.jonathan_s_room
-          data:
-            volume_level: 0.5
-        - action: tts.speak
-          continue_on_error: true
-          target:
-            entity_id: tts.openai_tts_gpt_4o_mini_tts
-          data:
-            media_player_entity_id: media_player.jonathan_s_room
-            cache: true
-            message: >-
-              Jonathan, please go to the bathroom before you go to bed.
-        # Wait up to 90 seconds for a flush. Checking last_changed also catches
-        # a flush that happened while the HomePods were still speaking.
-        - wait_template: >-
-            {{ is_state('binary_sensor.kids_room_toilet_vibraion_sensor_vibration', 'on')
-               or as_timestamp(states.binary_sensor.kids_room_toilet_vibraion_sensor_vibration.last_changed)
-                  > alert_started }}
-          timeout: "00:01:30"
+        - variables:
+            listening_since: "{{ now().timestamp() }}"
+
+        - repeat:
+            sequence:
+              - action: media_player.turn_on
+                continue_on_error: true
+                target:
+                  entity_id: media_player.jonathan_s_room
+              - delay: "00:00:02"
+              - action: media_player.volume_set
+                continue_on_error: true
+                target:
+                  entity_id: media_player.jonathan_s_room
+                data:
+                  volume_level: 0.5
+              - action: tts.speak
+                continue_on_error: true
+                target:
+                  entity_id: tts.openai_tts_gpt_4o_mini_tts
+                data:
+                  media_player_entity_id: media_player.jonathan_s_room
+                  cache: true
+                  message: >-
+                    Jonathan, please go to the bathroom before you go to bed.
+              # Wait up to 90 seconds for a flush. Checking last_changed also
+              # catches a flush that happened while the HomePods were speaking.
+              - wait_template: >-
+                  {{ is_state('binary_sensor.kids_room_toilet_vibraion_sensor_vibration', 'on')
+                     or as_timestamp(states.binary_sensor.kids_room_toilet_vibraion_sensor_vibration.last_changed)
+                        > listening_since }}
+                timeout: "00:01:30"
+            until:
+              # Stop reminding once the toilet flushes. As a safety net (dead
+              # sensor battery, nobody home) give up after 30 minutes.
+              - condition: template
+                value_template: >-
+                  {{ wait.completed or now().timestamp() - alert_started > 1800 }}
+
+        # The toilet flushed. Stay quiet for up to 3 minutes and see which
+        # room picks up new motion first: Jonathan's (bed zone or whole room)
+        # or Olivia's.
+        - if:
+            - condition: template
+              value_template: "{{ now().timestamp() - alert_started <= 1800 }}"
+          then:
+            - wait_for_trigger:
+                - trigger: state
+                  id: jonathan
+                  entity_id:
+                    - binary_sensor.jonathan_presence_sensor_bed
+                    - binary_sensor.jonathan_presence_sensor_entry_exit
+                  from: "off"
+                  to: "on"
+                - trigger: state
+                  id: olivia
+                  entity_id: binary_sensor.olivia_s_room_olivias_room_presence_sensor_occupancy
+                  from: "off"
+                  to: "on"
+              timeout: "00:03:00"
       until:
-        # Stop once he flushes. As a safety net (dead sensor battery, nobody
-        # home) give up after 30 minutes.
+        # Done unless Olivia's room claimed the flush. If neither room shows
+        # new motion, Jonathan gets the benefit of the doubt.
         - condition: template
           value_template: >-
-            {{ wait.completed or now().timestamp() - alert_started > 1800 }}
+            {{ now().timestamp() - alert_started > 1800
+               or wait.trigger is not defined
+               or wait.trigger is none
+               or wait.trigger.id != 'olivia' }}
 
   # Put the speakers back to the volume they were at.
   - if:
