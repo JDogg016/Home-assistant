@@ -1,0 +1,101 @@
+[
+  {
+    "id": "8b623df57893f4e6",
+    "type": "function",
+    "z": "d4a27055bc2f9b38",
+    "name": "Decide What To Do",
+    "func": "const mode = (msg.payload || '').trim();\nconst tod = msg.timeOfDay;\nconst popcorn = msg.input_boolean?.popcorn;\n\nmsg.action = null;\n\n// VACATION GATE (2026-07-22): skip the morning/evening routine entirely while\n// on vacation. It was briefly setting Mode to Home twice a day (1s alarm\n// disarm, shades cycling, music + outdoor lights left on with nobody home).\nif (mode === 'Vacation') {\n    msg.action = { type: 'none' };\n    return msg;\n}\n\n// AWAY AT 06:30 -> VACATION (2026-11-24): if the mode is still Away when the 06:30\n// Beginning-of-Day run starts and nobody in the family is home, the house goes\n// into Vacation instead of being flipped to Home (which also disarmed the alarm\n// and opened the shades in an empty house). Only runs 06:30-08:00 so the earlier\n// wake-condition path (04:00-06:30) is unchanged. If anyone is home, the original\n// behaviour below still applies.\nif (mode === 'Away' && tod === 'morning') {\n    const nowD = new Date();\n    const mins = nowD.getHours() * 60 + nowD.getMinutes();\n    const st = global.get('homeassistant.homeAssistant.states') || {};\n    const FAMILY = ['person.justin_bennett','person.helen','person.matthew','person.olivia','person.jonathan'];\n    const known = FAMILY.filter(id => st[id] && st[id].state);\n    const familyHome = known.some(id => st[id].state === 'home');\n    // Only act when person states are actually loaded (e.g. not right after a restart).\n    if (mins >= 6*60 + 30 && mins < 8*60 && known.length > 0 && !familyHome) {\n        node.status({fill:'blue', shape:'dot', text:'Away @06:30 -> Vacation ' + nowD.toLocaleTimeString()});\n        msg.action = { type: 'vacation' };\n        return msg;\n    }\n}\n\n// Time guard: treat Home mode same as Night during morning window (4-8 AM)\n// This prevents an HA restart from bypassing the morning routine\nconst hour = new Date().getHours();\nconst isMorningWindow = (hour >= 4 && hour < 8);\n\nif (['Night', 'Away', 'Vacation'].includes(mode) || (mode === 'Home' && isMorningWindow)) {\n    msg.action = { type: 'checkSchoolDay' };\n} else if (tod === 'evening' && popcorn !== 'on') {\n    msg.action = { type: 'checkPopcorn' };\n} else {\n    msg.action = { type: 'none' };\n}\n\nreturn msg;",
+    "outputs": 1,
+    "timeout": "",
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 960,
+    "y": 786,
+    "wires": [
+      [
+        "3b028a75634f24a9"
+      ]
+    ]
+  },
+  {
+    "id": "3b028a75634f24a9",
+    "type": "switch",
+    "z": "d4a27055bc2f9b38",
+    "name": "Route Based On Action",
+    "property": "action.type",
+    "rules": [
+      {
+        "t": "eq",
+        "v": "checkPopcorn",
+        "vt": "str"
+      },
+      {
+        "t": "eq",
+        "v": "checkSchoolDay",
+        "vt": "str"
+      },
+      {
+        "t": "eq",
+        "v": "none",
+        "vt": "str"
+      },
+      {
+        "t": "eq",
+        "v": "vacation",
+        "vt": "str"
+      }
+    ],
+    "checkall": "true",
+    "repair": false,
+    "outputs": 4,
+    "x": 1160,
+    "y": 786,
+    "wires": [
+      [
+        "04e2c44d8e84c9e6",
+        "e8f09c3b6a125236",
+        "f655f74f41a5101f"
+      ],
+      [
+        "d063e857cafb3d1b"
+      ],
+      [],
+      [
+        "away_to_vacation_set_mode"
+      ]
+    ]
+  },
+  {
+    "id": "away_to_vacation_set_mode",
+    "type": "api-call-service",
+    "z": "d4a27055bc2f9b38",
+    "name": "Set Mode Vacation (Away at 6:30)",
+    "server": "6e751b1b.8f17c4",
+    "version": 7,
+    "debugenabled": false,
+    "action": "input_select.select_option",
+    "floorId": [],
+    "areaId": [],
+    "deviceId": [],
+    "entityId": [
+      "input_select.mode"
+    ],
+    "labelId": [],
+    "data": "{\"option\":\"Vacation\"}",
+    "dataType": "jsonata",
+    "mergeContext": "",
+    "mustacheAltTags": false,
+    "outputProperties": [],
+    "queue": "none",
+    "blockInputOverrides": true,
+    "domain": "input_select",
+    "service": "select_option",
+    "x": 1420,
+    "y": 906,
+    "wires": [
+      []
+    ]
+  }
+]
